@@ -91,7 +91,11 @@ Browser execution identity is task plus semantic human revision, not the transie
 `turn_id`. A server-owned user-message id is preferred; otherwise the message's historical turn id
 is used. This lets a reconnect or restart carrying the same human instruction rejoin the existing
 execution even when Codex assigns the observer a new turn id. Native round replay and retry budgets
-remain keyed by the current turn id, and different task/thread owners can execute concurrently.
+remain keyed by the current turn id, and different task/thread owners can execute concurrently. If
+the Responses observer disconnects, the exact semantic execution stays available for a canonical
+reconnect; a later, different human revision for that same task supersedes the detached execution,
+cancels its browser turn, waits for physical helper cleanup, and then takes ownership of the retained
+surface.
 
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being

@@ -123,6 +123,6 @@ test("a new semantic revision supersedes an observer-detached same-thread browse
   expect(cancellations).toBe(1);
   expect(starts).toBe(1);
   expect(sessions.find("old-execution")).toBeUndefined();
-  expect(replacement).toBe(sessions.find("new-execution"));
+  expect(sessions.find("new-execution")).toBe(replacement);
   sessions.clear();
 });
