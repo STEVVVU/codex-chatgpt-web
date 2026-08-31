@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
+import { chatGptWebExecutionNamespace, chatGptWebTraceId } from "../src/adapters/chatgpt-web";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, defaultConfig, providerConfig } from "../src/config";
 import { parseRequest } from "../src/responses/parser";
@@ -390,17 +390,17 @@ test("a Codex retry after tab cancellation receives terminal HTTP 400 without a 
   }
 });
 
-test("a restart recovery turn without a new user instruction fails terminally instead of replaying the stopped prompt", async () => {
+test("a restart recovery turn reuses the existing semantic user execution under a refreshed native turn id", async () => {
   const config = defaultConfig("browser-only");
   const previousTurnId = "turn_before_codex_restart";
   const recoveryTurnId = "turn_after_codex_restart";
-  const body = {
+  const originalBody = {
     model: "chatgpt-web/high",
     stream: true,
     client_metadata: {
       "x-codex-turn-metadata": JSON.stringify({
         thread_id: "thread_codex_restart",
-        turn_id: recoveryTurnId,
+        turn_id: previousTurnId,
       }),
     },
     input: [
@@ -410,34 +410,57 @@ test("a restart recovery turn without a new user instruction fails terminally in
         content: [{ type: "input_text", text: "Run the original task" }],
         internal_chat_message_metadata_passthrough: { turn_id: previousTurnId },
       },
+    ],
+  };
+  const recoveryBody = structuredClone(originalBody);
+  recoveryBody.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+    thread_id: "thread_codex_restart",
+    turn_id: recoveryTurnId,
+  });
+  recoveryBody.input.push(
       {
         type: "message",
         role: "developer",
         content: [{ type: "input_text", text: "<skills_instructions>fresh skills</skills_instructions>" }],
         internal_chat_message_metadata_passthrough: { turn_id: recoveryTurnId },
       },
-    ],
-  };
-  let adapterConstructions = 0;
+  );
 
-  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }), config, () => {
-    adapterConstructions += 1;
-    throw new Error("a context-only recovery turn must not construct a browser adapter");
-  });
+  const original = parseRequest(originalBody);
+  routeChatGptWebRequest(original, config);
+  const recovery = parseRequest(recoveryBody);
+  routeChatGptWebRequest(recovery, config);
+  expect(chatGptTurnExecutionKey(recovery)).toBe(chatGptTurnExecutionKey(original));
 
-  expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({
-    error: {
-      code: "invalid_request_error",
-      type: "invalid_request_error",
-      message: "ChatGPT web current user message conflicts with native Codex turn_id metadata",
-    },
-  });
-  expect(adapterConstructions).toBe(0);
+  const provider = providerConfig(config);
+  const executionKey = `${chatGptWebExecutionNamespace(provider)}:${chatGptTurnExecutionKey(original)}`;
+  const traceId = chatGptWebTraceId(provider, original);
+  const text = new ChatGptTextFeed();
+  text.push("Recovered original browser result");
+  chatGptTurnSessions.clear();
+  const existing = chatGptTurnSessions.getOrCreate(executionKey, () => ({
+    mode: "read-only",
+    browser: Promise.resolve("Recovered original browser result"),
+    physicalSettlement: Promise.resolve(),
+    trace: new ChatGptTraceFeed(),
+    text,
+    cancel: () => {},
+  }), traceId);
+  await existing.browserOutcome;
+  await existing.physicalSettlement;
+
+  try {
+    const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(recoveryBody),
+    }), config);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Recovered original browser result");
+  } finally {
+    chatGptTurnSessions.clear();
+  }
 });
 
 test("authenticated lifecycle control aborts active HTTP work before acknowledging cancellation", async () => {

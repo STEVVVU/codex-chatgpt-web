@@ -87,6 +87,12 @@ partition and keep independent documents and lifecycles. Closing a running tab d
 and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
 parallel traffic that could trigger account abuse controls.
 
+Browser execution identity is task plus semantic human revision, not the transient native Codex
+`turn_id`. A server-owned user-message id is preferred; otherwise the message's historical turn id
+is used. This lets a reconnect or restart carrying the same human instruction rejoin the existing
+execution even when Codex assigns the observer a new turn id. Native round replay and retry budgets
+remain keyed by the current turn id, and different task/thread owners can execute concurrently.
+
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being
 redirected to another browser. After the provider returns to ChatGPT, the launcher requires both a

@@ -5,7 +5,7 @@ import { chatGptBrowserTabClosedError } from "./adapter-error";
 import {
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
-  extractChatGptTurnUserRevision,
+  extractChatGptTurnSemanticUserRevision,
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
@@ -161,11 +161,10 @@ export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   return executionKey(parsed, {
     threadId: identity.threadId,
-    turnId: identity.turnId,
     purpose: parsed._compactionRequest ? "compaction" : "response",
     revision: parsed._compactionRequest
       ? compactionInputRevision(parsed)
-      : extractChatGptTurnUserRevision(parsed),
+      : extractChatGptTurnSemanticUserRevision(parsed),
   });
 }
 
@@ -218,9 +217,8 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
   const source = extractChatGptCompactionSourceRevision(parsed);
   return executionKey(parsed, {
     threadId: identity.threadId,
-    turnId: source.turnId ?? identity.turnId,
     purpose: "response",
-    revision: source.content,
+    revision: source,
   });
 }
 

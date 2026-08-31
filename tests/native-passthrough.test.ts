@@ -166,6 +166,54 @@ test("removes ChatGPT Web item identities before native Codex compaction", async
   expect(forwarded.input.at(-1)).toEqual({ type: "compaction_trigger" });
 });
 
+test("decodes bridge compaction before forwarding history back to native Codex", async () => {
+  const summary = "The user is debugging a ChatGPT Web bridge. Continue from the native passthrough fix.";
+  const encodedSummary = `ocx1:${Buffer.from(summary, "utf-8").toString("base64")}`;
+  const body = {
+    model: "gpt-5.6-sol",
+    previous_response_id: "resp_local_web_turn",
+    input: [
+      {
+        type: "compaction",
+        id: "cmp_11111111111111111111111111111111",
+        encrypted_content: encodedSummary,
+      },
+      {
+        type: "message",
+        id: "msg_22222222222222222222222222222222",
+        role: "user",
+        content: [{ type: "input_text", text: "Continue" }],
+      },
+    ],
+  };
+  const request = new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer codex-oauth-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  let upstreamRequest: Request | undefined;
+  await forwardNativeCodexRequest(request, "responses", async input => {
+    upstreamRequest = input;
+    return new Response("data: native\n\n", { headers: { "content-type": "text/event-stream" } });
+  }, body);
+
+  const forwarded = await upstreamRequest!.json() as typeof body;
+  expect(forwarded).not.toHaveProperty("previous_response_id");
+  expect(forwarded.input.every(item => !("id" in item))).toBe(true);
+  expect(JSON.stringify(forwarded)).not.toContain("ocx1:");
+  expect(forwarded.input[0]).toEqual({
+    type: "message",
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: expect.stringContaining(summary),
+    }],
+  });
+});
+
 test("keeps native encrypted reasoning requests byte-for-byte intact", async () => {
   const body = JSON.stringify({
     model: "gpt-5.6-sol",

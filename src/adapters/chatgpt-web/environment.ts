@@ -35,11 +35,14 @@ export interface ChatGptThreadSpawnLineage {
 
 export interface ChatGptTurnUserRevision {
   content: unknown;
+  messageId?: string;
   turnId?: string;
 }
 
-export const CHATGPT_TURN_REVISION_CONFLICT_MESSAGE =
-  "ChatGPT web current user message conflicts with native Codex turn_id metadata";
+export interface ChatGptTurnSemanticUserRevision {
+  content: unknown;
+  source: { messageId: string } | { turnId: string };
+}
 
 export class MissingTrustedCodexEnvironmentError extends Error {
   constructor(field: string) {
@@ -97,23 +100,28 @@ function contextualUserMessage(value: Record<string, unknown>): boolean {
     || text === OPAQUE_COMPACTION_NOTE;
 }
 
-/**
- * Return the latest real user instruction owned by the current native Codex turn.
- *
- * Provider rounds replay the same instruction and steering appends a newer one. Remote
- * compaction uses this revision to identify and stop the superseded browser response; once Codex
- * installs the replacement history, the immediate continuation starts a fresh browser response
- * under the same logical task revision.
- */
+/** Return the latest real user instruction, independent of which native request is observing it. */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
   const turnId = extractChatGptTurnIdentity(parsed).turnId;
   if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed);
   if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
-  if (revision.turnId !== undefined && revision.turnId !== turnId) {
-    throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
-  }
   return revision.content;
+}
+
+/**
+ * Stable semantic identity for one human instruction.
+ *
+ * A Codex recovery/reconnect can wrap the same historical instruction in a fresh native turn_id.
+ * Prefer the server-owned message id, then the instruction's own historical turn id, and use the
+ * observing request's turn id only when Codex supplied neither stable source.
+ */
+export function extractChatGptTurnSemanticUserRevision(parsed: CodexParsedRequest): ChatGptTurnSemanticUserRevision {
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const revision = latestChatGptTurnUserRevision(parsed);
+  if (!revision) throw new Error("ChatGPT web requires a current-turn user message for browser-session replay");
+  return semanticUserRevision(revision, turnId);
 }
 
 function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision | undefined {
@@ -124,19 +132,36 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest): ChatGptTurnU
     if (item?.type !== "message" || item.role !== "user") continue;
     if (contextualUserMessage(item)) continue;
     const messageTurnId = itemTurnId(item);
-    const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
-    if (messageTurnId === undefined && !serverOwnedId) continue;
-    return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
+    const messageId = typeof item.id === "string" && item.id.length > 0 ? item.id : undefined;
+    return {
+      content: item.content,
+      ...(messageId ? { messageId } : {}),
+      ...(messageTurnId ? { turnId: messageTurnId } : {}),
+    };
   }
   return undefined;
 }
 
+function semanticUserRevision(
+  revision: ChatGptTurnUserRevision,
+  fallbackTurnId: string,
+): ChatGptTurnSemanticUserRevision {
+  return {
+    content: revision.content,
+    source: revision.messageId
+      ? { messageId: revision.messageId }
+      : { turnId: revision.turnId ?? fallbackTurnId },
+  };
+}
+
 /** The human instruction summarized by a remote compaction request belongs to an earlier turn. */
-export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
+export function extractChatGptCompactionSourceRevision(parsed: CodexParsedRequest): ChatGptTurnSemanticUserRevision {
   if (!parsed._compactionRequest) throw new Error("ChatGPT web compaction source requires a compaction request");
+  const turnId = extractChatGptTurnIdentity(parsed).turnId;
+  if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
   const revision = latestChatGptTurnUserRevision(parsed);
   if (!revision) throw new Error("ChatGPT web compaction requires a source user message");
-  return revision;
+  return semanticUserRevision(revision, turnId);
 }
 
 function environmentBeforeUser(input: unknown[], userIndex: number, expectedTurnId?: string): string | undefined {

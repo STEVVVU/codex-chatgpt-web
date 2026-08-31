@@ -250,13 +250,47 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(() => chatGptTurnExecutionKey(request)).not.toThrow();
   });
 
-  test("rejects canonical environment and user revision when an item conflicts with the current turn", () => {
-    const request = canonicalCurrentWireRequest(environmentXml);
-    const raw = request._rawBody as { input: Array<Record<string, unknown>> };
-    raw.input[2]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_other" };
+  test("keeps a server-owned human revision stable across a refreshed native turn", () => {
+    const original = canonicalCurrentWireRequest(environmentXml);
+    const recovery = structuredClone(original);
+    const raw = recovery._rawBody as {
+      client_metadata: Record<string, unknown>;
+      input: Array<Record<string, unknown>>;
+    };
+    raw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_test_123",
+      turn_id: "turn_recovered_456",
+      request_kind: "turn",
+      sandbox: "none",
+    });
+    raw.input[2]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_test_123" };
 
-    expect(() => extractChatGptTurnEnvironment(request)).toThrow("missing cwd");
-    expect(() => chatGptTurnExecutionKey(request)).toThrow("conflicts with native Codex turn_id");
+    // Environment authority remains current-turn scoped even though semantic user identity is not.
+    expect(() => extractChatGptTurnEnvironment(recovery)).toThrow("missing cwd");
+    expect(chatGptTurnExecutionKey(recovery)).toBe(chatGptTurnExecutionKey(original));
+  });
+
+  test("uses a historical user turn as semantic revision identity when no server message id exists", () => {
+    const original = rawWireRequest(environmentXml);
+    const recovery = structuredClone(original);
+    const recoveryRaw = recovery._rawBody as { client_metadata: Record<string, unknown> };
+    recoveryRaw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_test_123",
+      turn_id: "turn_recovered_456",
+    });
+    expect(chatGptTurnExecutionKey(recovery)).toBe(chatGptTurnExecutionKey(original));
+
+    const repeatedPrompt = structuredClone(recovery);
+    const repeatedRaw = repeatedPrompt._rawBody as {
+      client_metadata: Record<string, unknown>;
+      input: Array<Record<string, unknown>>;
+    };
+    repeatedRaw.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+      thread_id: "thread_test_123",
+      turn_id: "turn_new_instruction_789",
+    });
+    repeatedRaw.input[1]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_new_instruction_789" };
+    expect(chatGptTurnExecutionKey(repeatedPrompt)).not.toBe(chatGptTurnExecutionKey(original));
   });
 
   test("starts a tool-capable browser turn across a same-turn developer gap", async () => {
@@ -828,6 +862,68 @@ describe("ChatGPT outer-native harness v4", () => {
     expect((await replacement).traceId).toBe("new-trace");
     expect(replacements).toBe(1);
     expect(cancellations).toBe(0);
+    sessions.clear();
+  });
+
+  test("runs different thread owners concurrently while serializing the next turn of one thread", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let finishA!: (answer: string) => void;
+    let settleA!: () => void;
+    const browserA = new Promise<string>(resolve => { finishA = resolve; });
+    const physicalA = new Promise<void>(resolve => { settleA = resolve; });
+    sessions.getOrCreate("thread-a-turn-1", () => ({
+      mode: "read-only",
+      browser: browserA,
+      physicalSettlement: physicalA,
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {},
+    }), "trace-a-1", "thread-a");
+
+    let nextAStarts = 0;
+    const nextA = sessions.getOrCreateAfterOwnerRetirement(
+      "thread-a-turn-2",
+      "thread-a",
+      () => {
+        nextAStarts += 1;
+        return {
+          mode: "read-only" as const,
+          browser: Promise.resolve("a2"),
+          physicalSettlement: Promise.resolve(),
+          trace: new ChatGptTraceFeed(),
+          text: new ChatGptTextFeed(),
+          cancel: () => {},
+        };
+      },
+      "trace-a-2",
+    );
+
+    let threadBStarts = 0;
+    const threadB = await sessions.getOrCreateAfterOwnerRetirement(
+      "thread-b-turn-1",
+      "thread-b",
+      () => {
+        threadBStarts += 1;
+        return {
+          mode: "read-only" as const,
+          browser: Promise.resolve("b1"),
+          physicalSettlement: Promise.resolve(),
+          trace: new ChatGptTraceFeed(),
+          text: new ChatGptTextFeed(),
+          cancel: () => {},
+        };
+      },
+      "trace-b-1",
+    );
+
+    expect(threadB.traceId).toBe("trace-b-1");
+    expect(threadBStarts).toBe(1);
+    expect(nextAStarts).toBe(0);
+
+    finishA("a1");
+    settleA();
+    expect((await nextA).traceId).toBe("trace-a-2");
+    expect(nextAStarts).toBe(1);
     sessions.clear();
   });
 
