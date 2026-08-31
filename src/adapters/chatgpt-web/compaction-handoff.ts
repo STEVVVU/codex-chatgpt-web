@@ -205,11 +205,15 @@ export async function requestRetainedCompactionHandoff(
       abortSignal: browserAbort.signal,
       onTextDelta: () => {},
     });
-    const [summary] = await Promise.all([
-      broker.waitForCompactionHandoff(transaction.token, signal),
-      browser,
-    ]);
-    return summary;
+    const handoff = broker.waitForCompactionHandoff(transaction.token, signal);
+    const browserFailure = browser.then(
+      () => new Promise<string>(() => {}),
+      error => Promise.reject(error),
+    );
+    // The structured MCP submission is the completion contract. The visible assistant DOM turn is
+    // only transport scaffolding: once the one-shot handoff has been accepted, a late DOM binding
+    // failure must not invalidate the checkpoint that the retained agent already submitted.
+    return await Promise.race([handoff, browserFailure]);
   } finally {
     browserAbort.abort();
     broker.abortCompactionTransaction(transaction.token);
