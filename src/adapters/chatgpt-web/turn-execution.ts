@@ -237,6 +237,7 @@ export class ChatGptTurnSession {
   private settledPhysical = false;
   private tail: Promise<void> = Promise.resolve();
   private capabilityRetirementScheduled = false;
+  private detachedObserver = false;
   private readonly rounds = new Map<string, {
     events: AdapterEvent[];
     reasoning: string[];
@@ -267,7 +268,14 @@ export class ChatGptTurnSession {
 
   runExclusive<T>(task: () => Promise<T>): Promise<T> {
     this.touch();
-    const run = this.tail.then(task);
+    // Entering an exact replay/reconnect means the execution has an observer again.
+    this.detachedObserver = false;
+    const run = this.tail.then(task).catch(error => {
+      // An AbortError here is the Responses observer detaching. Keep the exact execution alive for
+      // a canonical reconnect, but remember that a different semantic revision may supersede it.
+      if (error instanceof DOMException && error.name === "AbortError") this.detachedObserver = true;
+      throw error;
+    });
     this.tail = run.then(() => undefined, () => undefined);
     this.scheduleCapabilityRetirement();
     return run;
@@ -279,6 +287,10 @@ export class ChatGptTurnSession {
 
   lastUsedAt(): number {
     return this.lastTouchedAt;
+  }
+
+  wasObserverDetached(): boolean {
+    return this.detachedObserver;
   }
 
   outstanding(): BrokerToolRequest[] {
@@ -495,11 +507,18 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
-        // A different native message for the same thread is sequential work, not permission to
-        // kill the response already using that retained conversation. Wait for its complete
-        // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
-        // only paths that preempt an active owner.
+        const [ownedKey, ownedSession] = activeOwner;
+        if (ownedSession.wasObserverDetached()) {
+          // A disconnected observer may reconnect to the exact same semantic execution key. Once
+          // Codex supplies a different semantic revision, however, the detached browser turn is
+          // stale and must be cancelled before that replacement can reuse the retained tab.
+          if (this.entries.get(ownedKey) === ownedSession) this.entries.delete(ownedKey);
+          this.forgetConversationHead(ownedSession);
+          await this.beginRetirement(ownedKey, ownedSession);
+          continue;
+        }
+        // While the original observer is still attached, a later native message remains
+        // sequential work and waits for the browser/launcher handoff to settle normally.
         await ownedSession.physicalSettlement;
         continue;
       }
